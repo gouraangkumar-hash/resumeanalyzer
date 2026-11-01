@@ -1,17 +1,20 @@
 """Resume analysis service using LangChain and Google Gemini API.
 
-Orchestrates a two-stage prompt chain:
+Orchestrates a two-stage pipeline:
 1. Stage 1: Fact and requirement extraction (ExtractionResult)
 2. Stage 2: Rubric-based comparative evaluation and coaching (ResumeAnalysisResult)
+Supports plain text, PDF, DOCX, and TXT inputs for Resume and Job Description.
 """
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Callable, Optional, Union
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from src.schemas import ExtractionResult, ResumeAnalysisResult
+from src.pdf_parser import extract_text_from_document, extract_text_from_pdf
+from src.pii import redact_pii
+from src.schemas import ExtractionResult, ResumeAnalysisResult, skill_is_matched
 from src.prompts import STAGE1_PROMPT, STAGE2_PROMPT
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -61,29 +64,73 @@ def create_gemini_llm(
     )
 
 
+def reconcile_evaluation_scores(
+    evaluation_result: ResumeAnalysisResult,
+    extracted_facts: ExtractionResult,
+) -> ResumeAnalysisResult:
+    """Deterministically reconciles match_score from sub-scores and enforces the <50% required-skills cap."""
+    subscores = (
+        evaluation_result.required_skills_score,
+        evaluation_result.experience_alignment_score,
+        evaluation_result.preferred_and_education_score,
+        evaluation_result.clarity_and_impact_score,
+    )
+    if all(score is not None for score in subscores):
+        raw_total = sum(int(s) for s in subscores if s is not None)
+        evaluation_result.match_score = max(0, min(100, raw_total))
+
+    req_skills = [s.strip() for s in extracted_facts.jd_required_skills if s and s.strip()]
+    if req_skills:
+        matched_req = sum(
+            1 for r in req_skills if skill_is_matched(r, evaluation_result.matched_skills)
+        )
+        if (matched_req / len(req_skills)) < 0.5:
+            evaluation_result.match_score = min(evaluation_result.match_score, 50)
+
+    return evaluation_result
+
+
 def _run_two_stage_pipeline(
-    llm: ChatGoogleGenerativeAI, cleaned_resume: str, cleaned_jd: str
+    llm: ChatGoogleGenerativeAI,
+    cleaned_resume: str,
+    cleaned_jd: str,
+    on_stage1_complete: Optional[Callable[[ExtractionResult], None]] = None,
 ) -> ResumeAnalysisResult:
     """Executes Stage 1 extraction followed by Stage 2 evaluation."""
-    # Build Stage 1 chain: Extraction
     stage1_structured_llm = llm.with_structured_output(ExtractionResult)
     stage1_chain = STAGE1_PROMPT | stage1_structured_llm
 
-    # Run Stage 1
-    extracted_facts: ExtractionResult = stage1_chain.invoke(
+    extracted_facts = stage1_chain.invoke(
         {"resume_text": cleaned_resume, "jd_text": cleaned_jd}
     )
+    if extracted_facts is None:
+        raise RuntimeError(
+            "Document requirement extraction returned an empty response from the model."
+        )
+    if isinstance(extracted_facts, dict):
+        extracted_facts = ExtractionResult.model_validate(extracted_facts)
 
-    # Build Stage 2 chain: Evaluation
+    if on_stage1_complete is not None:
+        on_stage1_complete(extracted_facts)
+
     stage2_structured_llm = llm.with_structured_output(ResumeAnalysisResult)
     stage2_chain = STAGE2_PROMPT | stage2_structured_llm
 
-    # Run Stage 2 with the serialized extracted facts
-    evaluation_result: ResumeAnalysisResult = stage2_chain.invoke(
-        {"extracted_data_json": extracted_facts.model_dump_json(indent=2)}
+    evaluation_result = stage2_chain.invoke(
+        {
+            "extracted_data_json": extracted_facts.model_dump_json(indent=2),
+            "resume_text": cleaned_resume,
+            "jd_text": cleaned_jd,
+        }
     )
+    if evaluation_result is None:
+        raise RuntimeError(
+            "Resume evaluation returned an empty response from the model."
+        )
+    if isinstance(evaluation_result, dict):
+        evaluation_result = ResumeAnalysisResult.model_validate(evaluation_result)
 
-    return evaluation_result
+    return reconcile_evaluation_scores(evaluation_result, extracted_facts)
 
 
 def _handle_llm_exception(exc: Exception) -> None:
@@ -91,63 +138,96 @@ def _handle_llm_exception(exc: Exception) -> None:
     err_msg = str(exc)
     if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
         raise RuntimeError(
-            "Gemini API rate limit or quota exceeded. Please wait a minute before trying again."
+            "Service rate limit or quota exceeded. Please wait a minute before trying again."
         ) from exc
     if "401" in err_msg or "403" in err_msg or "API_KEY_INVALID" in err_msg:
         raise RuntimeError(
-            "Invalid Gemini API key. Please check your credentials in .env or the UI."
+            "Invalid API key configured. Please check your credentials in .env."
         ) from exc
-    raise RuntimeError(f"Resume analysis failed: {exc}") from exc
+    raise RuntimeError(f"Resume evaluation failed: {exc}") from exc
 
 
 def analyze_resume(
-    resume_text: str,
-    jd_text: str,
+    resume_text: Optional[Union[str, bytes, BinaryIO]] = None,
+    jd_text: Optional[Union[str, bytes, BinaryIO]] = None,
     api_key: Optional[str] = None,
     model_name: Optional[str] = None,
     fallback_model_name: Optional[str] = None,
+    on_stage1_complete: Optional[Callable[[ExtractionResult], None]] = None,
+    resume_pdf: Optional[Union[BinaryIO, bytes, str, Path]] = None,
+    jd_pdf: Optional[Union[BinaryIO, bytes, str, Path]] = None,
+    redact_pii_enabled: bool = True,
+    resume_file: Optional[Union[BinaryIO, bytes, str, Path]] = None,
+    resume_filename: str = "",
+    jd_file: Optional[Union[BinaryIO, bytes, str, Path]] = None,
+    jd_filename: str = "",
 ) -> ResumeAnalysisResult:
-    """Executes the two-stage resume analysis pipeline with automatic fallback.
+    """Executes the resume against job description evaluation with text, PDF, DOCX, or TXT inputs."""
+    # Resolve Resume input
+    if resume_file is not None:
+        resolved_resume = extract_text_from_document(
+            resume_file, filename=resume_filename, document_name="Resume"
+        )
+    elif resume_pdf is not None:
+        resolved_resume = extract_text_from_pdf(resume_pdf, document_name="Resume PDF")
+    elif isinstance(resume_text, bytes) or hasattr(resume_text, "read"):
+        resolved_resume = extract_text_from_document(
+            resume_text, filename=resume_filename, document_name="Resume"
+        )
+    else:
+        resolved_resume = resume_text or ""
 
-    Args:
-        resume_text: Cleaned text extracted from the candidate's resume.
-        jd_text: Target job description text.
-        api_key: Optional Gemini API key override (e.g. from Streamlit UI).
-        model_name: Primary Gemini model name (defaults to gemini-3.5-flash-lite).
-        fallback_model_name: Fallback model if primary encounters an error (defaults to gemini-3.8-flash).
+    # Resolve Job Description input
+    if jd_file is not None:
+        resolved_jd = extract_text_from_document(
+            jd_file, filename=jd_filename, document_name="Job Description"
+        )
+    elif jd_pdf is not None:
+        resolved_jd = extract_text_from_pdf(jd_pdf, document_name="Job Description PDF")
+    elif isinstance(jd_text, bytes) or hasattr(jd_text, "read"):
+        resolved_jd = extract_text_from_document(
+            jd_text, filename=jd_filename, document_name="Job Description"
+        )
+    else:
+        resolved_jd = jd_text or ""
 
-    Returns:
-        Validated ResumeAnalysisResult containing match score, skills gap,
-        section feedback, bullet improvements, and priority fixes.
+    if not resolved_resume or not resolved_resume.strip():
+        raise ValueError(
+            "Resume text is empty. Please provide a valid resume file (.pdf, .docx, .txt) or text."
+        )
 
-    Raises:
-        ValueError: If input text is empty or invalid.
-        RuntimeError: If LLM call or chain execution fails across both models.
-    """
-    if not resume_text or not resume_text.strip():
-        raise ValueError("Resume text is empty. Please provide a valid resume.")
+    if not resolved_jd or not resolved_jd.strip():
+        raise ValueError(
+            "Job description is empty. Please provide a valid job description file (.pdf, .docx, .txt) or text."
+        )
 
-    if not jd_text or not jd_text.strip():
-        raise ValueError("Job description is empty. Please paste the job description text.")
+    if redact_pii_enabled:
+        resolved_resume, _ = redact_pii(resolved_resume)
+        resolved_jd, _ = redact_pii(resolved_jd)
 
-    cleaned_resume = resume_text.strip()[:MAX_RESUME_CHARS]
-    cleaned_jd = jd_text.strip()[:MAX_JD_CHARS]
+    cleaned_resume = resolved_resume.strip()[:MAX_RESUME_CHARS]
+    cleaned_jd = resolved_jd.strip()[:MAX_JD_CHARS]
 
     primary_model = model_name or os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
     fallback_model = fallback_model_name or os.getenv("GEMINI_FALLBACK_MODEL", FALLBACK_MODEL)
 
-    # Attempt primary model execution
     try:
         llm = create_gemini_llm(api_key=api_key, model_name=primary_model, temperature=0.1)
-        return _run_two_stage_pipeline(llm, cleaned_resume, cleaned_jd)
+        return _run_two_stage_pipeline(
+            llm, cleaned_resume, cleaned_jd, on_stage1_complete=on_stage1_complete
+        )
     except Exception as primary_exc:
-        # If a distinct fallback model is specified, attempt recovery
         if fallback_model and fallback_model != primary_model:
             try:
                 fallback_llm = create_gemini_llm(
                     api_key=api_key, model_name=fallback_model, temperature=0.1
                 )
-                return _run_two_stage_pipeline(fallback_llm, cleaned_resume, cleaned_jd)
+                return _run_two_stage_pipeline(
+                    fallback_llm,
+                    cleaned_resume,
+                    cleaned_jd,
+                    on_stage1_complete=on_stage1_complete,
+                )
             except Exception as fallback_exc:
                 _handle_llm_exception(fallback_exc)
 

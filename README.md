@@ -6,22 +6,22 @@ An academic Prompt Engineering application that analyzes a candidate's resume ag
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-1. **PDF Text Extraction:** Reads text-based candidate resumes in PDF format using `pypdf`, with automatic detection and graceful rejection of scanned, image-only, or empty PDFs.
+1. **Multi-Format Upload & Paste Support (`.pdf`, `.docx`, `.txt`):** Reads text-selectable PDFs (`pypdf`), Microsoft Word `.docx` files (zero external dependencies via Python `zipfile` + XML), plain text `.txt` files, or pasted text for both the candidate resume and the target job description—with automatic detection of scanned, password-protected, or legacy `.doc` files.
 2. **Two-Stage Prompt Chaining:**
    - **Stage 1 (Extraction):** Extracts only stated resume facts and categorizes JD requirements into required skills, preferred skills, and core responsibilities.
    - **Stage 2 (Evaluation):** Compares the isolated facts against JD requirements using a strict 100-point rubric.
-3. **Structured Pydantic Outputs:** Guarantees deterministic, type-safe JSON models for both pipeline stages.
-4. **Heuristic Match Score & Detailed Explanation:** Generates an evidence-based match score (0–100) with a written rationale and an explicit disclaimer distinguishing AI heuristics from real ATS or recruiter decisions.
-5. **Skills Gap Analysis:** Side-by-side identification of explicitly matched skills versus missing qualifications.
-6. **Section-by-Section Feedback:** Evaluates Summary, Skills, Projects, Experience, and Education sections individually.
-7. **Grounded Bullet Point Improvements:** Rewrites weak resume bullet points using action-oriented language while inserting bracketed placeholders (`[X]%`, `[Metric]`) instead of fabricating candidate metrics.
-8. **Top 3 Priority Fixes:** Highlights the three highest-impact edits for the candidate to make before applying.
+3. **Live Category Sub-Scores & Deterministic Reconciliation:** Breaks down earned points across Required Skills (`0–50`), Experience Alignment (`0–30`), Preferred & Education (`0–10`), and Clarity & Impact (`0–10`), deterministically reconciling the total and enforcing the `<50%` required-skills cap (`<= 50/100`).
+4. **Skills Gap Analysis & Live Keyword Highlighter:** Color-coded skill pills (`Matched` vs. `Missing`) with a live filter bar and a document viewer highlighting matched JD keywords directly inside the candidate's resume text.
+5. **Tailored Summary Draft & Interactive Bullet Revision Studio:** Generates a grounded 2–3 sentence professional summary draft and side-by-side bullet rewrites featuring **live inline inputs** for bracketed placeholders (`[X]%`, `[N]`, `[$Amount]`) so candidates can insert verified numbers without fabrication.
+6. **Local Resume Structure & Writing Health Check:** Pure-Python instant diagnostics (`src/resume_health.py`) checking word/page length balance, bullet quantification rate, passive opening phrases (*"Responsible for"*, *"Worked on"*), first-person pronouns, and standard section presence.
+7. **Targeted Interview Preparation:** Generates 3–5 role-specific interview preparation questions probing missing qualifications and project claims.
+8. **Formatted PDF, Markdown & JSON Report Export:** One-click export as a print-ready editorial **PDF report** (`reportlab`), **Markdown report** (`.md`), or **JSON bundle** (`.json`).
 
 ---
 
-## 🧠 Prompt Engineering Techniques Demonstrated
+## Prompt Engineering Techniques Demonstrated
 
 | Technique | Implementation Location | Purpose & Academic Contribution |
 | :--- | :--- | :--- |
@@ -33,7 +33,7 @@ An academic Prompt Engineering application that analyzes a candidate's resume ag
 
 ---
 
-## 📐 Scoring Rubric (100 Points Total)
+## Scoring Rubric (100 Points Total)
 
 The match score is calculated using the following heuristic criteria:
 
@@ -45,45 +45,55 @@ The match score is calculated using the following heuristic criteria:
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    User["User"] -->|Uploads PDF & pastes JD| UI["Streamlit UI (app.py)"]
-    UI -->|PDF bytes| Parser["PDF Parser (src/pdf_parser.py)"]
-    Parser -->|Cleaned text / Validation| UI
+    User["User"] -->|Uploads .pdf / .docx / .txt or pastes text| UI["Streamlit UI (app.py)"]
+    UI -->|Document bytes| Parser["Document Parser (src/pdf_parser.py)"]
+    Parser -->|Cleaned text + PII Masking| UI
     UI -->|resume_text + jd_text| Analyzer["Analyzer Service (src/analyzer.py)"]
+    UI -->|Local check| Health["Resume Health Check (src/resume_health.py)"]
     
     subgraph PromptChain["Two-Stage Prompt Chain"]
         Analyzer -->|Stage 1 Prompt| LLM1["Gemini LLM (Fact Extraction)"]
         LLM1 -->|ExtractionResult Schema| Intermediate["Structured Facts JSON"]
         Intermediate -->|Stage 2 Prompt + Rubric + Few-Shot| LLM2["Gemini LLM (Rubric Evaluation)"]
-        LLM2 -->|ResumeAnalysisResult Schema| FinalResult["Validated Analysis Object"]
+        LLM2 -->|ResumeAnalysisResult + Reconciliation| FinalResult["Validated Analysis Object"]
     end
     
     FinalResult --> UI
-    UI -->|Renders cards, tabs, skills & score| User
+    Health --> UI
+    UI -->|Renders sub-scores, revisions, health & PDF/MD/JSON exports| User
 ```
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 resumeanalyzer/
 ├── app.py                        # Single Streamlit entry point (run: streamlit run app.py)
+├── .streamlit/
+│   └── config.toml               # Clean high-contrast light editorial theme configuration
 ├── src/
 │   ├── __init__.py               # Package marker
 │   ├── schemas.py                # Pydantic models for Stage 1 extraction & Stage 2 evaluation
 │   ├── prompts.py                # Role prompts, few-shot examples, scoring rubric & templates
-│   ├── analyzer.py               # Env/API key handling + 2-stage LangChain/Gemini pipeline
-│   └── pdf_parser.py             # pypdf text extraction and empty/scanned PDF validation
+│   ├── analyzer.py               # Env/API key handling, 2-stage pipeline & score reconciliation
+│   ├── pdf_parser.py             # .pdf, .docx, and .txt text extraction and validation
+│   ├── pii.py                    # Local PII scrubbing (emails, phones, profile URLs, IDs)
+│   ├── resume_health.py          # Local deterministic length, quantification & active-verb checks
+│   └── ui_helpers.py             # SVG gauge, keyword highlighter, placeholder studio & PDF/MD/JSON exporters
 ├── tests/
-│   ├── test_analyzer.py          # Unit tests for Pydantic schemas & mocked 2-stage LLM chain
-│   ├── test_pdf_parser.py        # Unit tests for PDF extraction & validation
-│   └── test_schemas.py           # Unit tests for Pydantic models & validation constraints
+│   ├── test_analyzer.py          # Unit tests for score reconciliation & mocked 2-stage LLM chain
+│   ├── test_pdf_parser.py        # Unit tests for .pdf, .docx, and .txt extraction & validation
+│   ├── test_pii.py               # Unit tests for local PII redaction & edge cases
+│   ├── test_resume_health.py     # Unit tests for deterministic resume writing & formatting checks
+│   ├── test_schemas.py           # Unit tests for Pydantic models & validation constraints
+│   └── test_ui_helpers.py        # Unit tests for UI helpers, highlighting & PDF/MD/JSON report generation
 ├── .env.example                  # Template showing GOOGLE_API_KEY and GEMINI_MODEL
-├── requirements.txt              # Minimal required Python dependencies (7 packages)
+├── requirements.txt              # Required Python dependencies (8 packages including reportlab)
 ├── IMPLEMENTATION_PLAN.md        # Reference phase-by-phase development plan
 ├── PROJECT_STATUS.md             # Living progress log and architectural decision record
 └── README.md                     # Project documentation, prompt design & instructions
@@ -91,7 +101,7 @@ resumeanalyzer/
 
 ---
 
-## 👥 Team Responsibilities
+## Team Responsibilities
 
 | Team Member | Role | Owned Deliverables |
 | :--- | :--- | :--- |
@@ -101,7 +111,7 @@ resumeanalyzer/
 
 ---
 
-## 🚀 Quickstart & Setup Guide
+## Quickstart & Setup Guide
 
 ### 1. Prerequisites
 - **Python 3.10 or newer** (tested on Python 3.13)
@@ -152,8 +162,8 @@ All unit tests run offline using mocks and in-memory PDFs; **no live Gemini API 
 
 ---
 
-## ⚠️ Important Disclaimers & Ethics
+## Important Disclaimers & Ethics
 
 - **Heuristic Estimate, Not ATS:** The match score is an AI-generated heuristic intended to assist candidates with resume tailoring. It does **not** replicate proprietary ATS algorithms (e.g. Workday, Taleo, Greenhouse).
 - **No Prediction of Hiring:** This tool does **not** guarantee or predict interview callbacks or recruiter hiring decisions.
-- **Data Privacy:** Resumes are processed in-memory and passed to Google Gemini solely for the duration of the analysis request. No resume data or personal information is stored, logged, or shared externally.
+- **Data Privacy & Local PII Masking:** Resumes and job descriptions are processed strictly in-memory, and personal contact details (emails, phone numbers, profile links, and government ID patterns) are automatically masked locally via `src/pii.py` before any text is sent to the Gemini API. No resume data is stored or logged to disk.

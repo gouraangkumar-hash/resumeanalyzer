@@ -27,8 +27,21 @@
   - Verified Python syntax and compilation cleanly.
 - **Phase 6: Testing, Documentation & Final Polish** (Completed)
   - Authored comprehensive `README.md` covering architecture, prompt engineering techniques (role, chaining, few-shot, structured output, anti-fabrication), rubric, team deliverables, and setup instructions.
-  - Executed full test suite (`pytest tests/ -v`); all 17 tests passed with 100% success.
+  - Executed full test suite (`pytest tests/ -v`); all tests passed with 100% success.
   - Verified local single-command launch (`streamlit run app.py`).
+- **Phase 7: Editorial Frontend Overhaul & Full JD PDF Support** (Completed)
+  - Added full Job Description PDF extraction and document resolution in `src/pdf_parser.py` (`extract_text_from_pdf(..., document_name=...)`, `resolve_document_text()`) and direct `resume_pdf` / `jd_pdf` backend support in `src/analyzer.py`.
+  - Updated `app.py` so both Resume and Job Description support **Upload PDF** and **Paste Text** with instant extraction, word/character counts, and previews.
+  - Applied a high-contrast light editorial theme in `.streamlit/config.toml` and `app.py` with clean typography, flattened 2-column section feedback cards, and plain-English copy free of emojis and AI jargon.
+  - Added local PII redaction (`src/pii.py`) that masks emails, phone numbers, personal profile URLs, and ID numbers in memory before UI preview or LLM invocation.
+  - Added automated verification in `tests/test_pdf_parser.py`, `tests/test_pii.py`, `tests/test_analyzer.py`, `tests/test_schemas.py`, and `tests/test_ui_helpers.py`.
+- **Phase 8: Category Sub-Scores, Multi-Format Uploads, Resume Health, Coaching & PDF Export** (Completed)
+  - Added live earned category sub-scores (`required_skills_score` /50, `experience_alignment_score` /30, `preferred_and_education_score` /10, `clarity_and_impact_score` /10) in `src/schemas.py`, deterministic score summation + `<50%` required-skills cap reconciliation in `src/analyzer.py`, and proportional category bars in `app.py`.
+  - Extended `src/pdf_parser.py`, `src/analyzer.py`, and `app.py` to support `.pdf`, `.docx` (stdlib `zipfile` + XML), and `.txt` uploads symmetrically for both Candidate Resume and Job Description with local PII scrubbing.
+  - Added `src/resume_health.py` for instant deterministic checks on word/page balance, bullet quantification rate, passive opening verbs, first-person pronouns, and standard resume sections.
+  - Added `suggested_summary` (with interactive placeholder fill-in) and `interview_questions` (3–5 role-gap prep questions) to Stage 2 output, UI tabs, and exported reports.
+  - Added print-ready editorial `.pdf` report generation (`generate_pdf_report()` via ReportLab) alongside `.md` and `.json` exports.
+  - Expanded automated offline test suite to 43 passing tests (`pytest tests/ -v`).
 
 ## Key Decisions
 1. **Two-Stage Prompt Chain:** Stage 1 extracts stated facts from the resume and categorizes JD requirements (`ExtractionResult`); Stage 2 compares them using a 100-point heuristic rubric (`ResumeAnalysisResult`).
@@ -42,9 +55,9 @@
 7. **Pure Backend Configuration & Clean UI:** Removed configuration controls (API key inputs, model selection) and assignment context from the Streamlit frontend. The app presents a clean, focused single-page interface while configuration is strictly managed at the backend via `.env` and `src/analyzer.py`.
 
 ## Project Status
-- **Status:** All 6 phases successfully implemented, verified, and documented.
+- **Status:** All phases implemented, verified, and documented locally.
 - **Run Locally:** `streamlit run app.py`
-- **Run Tests:** `pytest tests/` (18/18 passing)
+- **Run Tests:** `pytest tests/` (43/43 passing)
 
 ## Outstanding Issues
 - None.

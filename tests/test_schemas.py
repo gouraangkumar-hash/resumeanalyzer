@@ -6,6 +6,7 @@ from src.schemas import (
     ExtractionResult,
     SectionFeedback,
     BulletImprovement,
+    InterviewQuestion,
     ResumeAnalysisResult,
 )
 
@@ -107,6 +108,55 @@ def test_priority_fixes_empty_default():
         match_score=70,
         score_explanation="Average match",
         section_feedback=feedback,
-        priority_fixes=[],
+        priority_fixes=["   ", ""],
     )
     assert len(result.priority_fixes) >= 1
+    assert all(fix.strip() for fix in result.priority_fixes)
+
+
+def test_subscores_summary_and_interview_questions_validation():
+    """Verify category sub-score bounds, summary trimming, and structured/string interview question cleanup."""
+    feedback = SectionFeedback(
+        summary="ok", skills="ok", projects="ok", experience="ok", education="ok"
+    )
+    res = ResumeAnalysisResult(
+        match_score=83,
+        required_skills_score=42,
+        experience_alignment_score=24,
+        preferred_and_education_score=8,
+        clarity_and_impact_score=9,
+        score_explanation="Strong alignment.",
+        section_feedback=feedback,
+        suggested_summary="  Backend engineer skilled in Python and FastAPI with [N] years of experience.  ",
+        interview_questions=[
+            InterviewQuestion(
+                resume_anchor="  **OrderStream API project (Flask, MySQL)**  ",
+                jd_focus="  PostgreSQL Migration & Docker  ",
+                question="1. **In your OrderStream API project, how would you migrate your MySQL schema to PostgreSQL?**",
+                preparation_tip="  Walk through **OrderStream's** current schema and indexing choices honestly.  ",
+            ),
+            "  Q2: How would you design container orchestration in Kubernetes?  ",
+            "",
+            "   ",
+        ],
+        priority_fixes=["Add container orchestration project details."],
+    )
+    assert res.required_skills_score == 42
+    assert res.suggested_summary.startswith("Backend engineer")
+    assert len(res.interview_questions) == 2
+    assert res.interview_questions[0].resume_anchor == "OrderStream API project (Flask, MySQL)"
+    assert res.interview_questions[0].question == (
+        "In your OrderStream API project, how would you migrate your MySQL schema to PostgreSQL?"
+    )
+    assert "**" not in res.interview_questions[0].preparation_tip
+    assert res.interview_questions[1].question == (
+        "How would you design container orchestration in Kubernetes?"
+    )
+
+    with pytest.raises(ValidationError):
+        ResumeAnalysisResult(
+            match_score=80,
+            required_skills_score=55,  # exceeds max 50
+            score_explanation="Invalid subscore",
+            section_feedback=feedback,
+        )
